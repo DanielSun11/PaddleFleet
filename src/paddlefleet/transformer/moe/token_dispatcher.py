@@ -153,6 +153,7 @@ class _DeepepManager(_DispatchManager):
         token_weights: paddle.Tensor,
         fp8_dispatch: bool = False,
         async_finish: bool = False,
+        use_ue8m0: bool = False,
     ) -> paddle.Tensor:
         hidden_states, dispatched_probs, states, scale = fused_dispatch(
             hidden_states,
@@ -162,6 +163,7 @@ class _DeepepManager(_DispatchManager):
             self.group,
             fp8_dispatch=fp8_dispatch,
             async_finish=async_finish,
+            use_ue8m0=use_ue8m0,
         )
         self.handle = states["handle"]
         self.tokens_per_expert = states["tokens_per_expert"]
@@ -175,6 +177,7 @@ class _DeepepManager(_DispatchManager):
         hidden_states: paddle.Tensor,
         fp8_dispatch: bool = False,
         async_finish: bool = False,
+        use_ue8m0: bool = False,
     ) -> paddle.Tensor:
         hidden_states, dispatched_probs, states, scale = fused_dispatch(
             hidden_states,
@@ -185,6 +188,7 @@ class _DeepepManager(_DispatchManager):
             fp8_dispatch=fp8_dispatch,
             async_finish=async_finish,
             moe_ep_barrier=self.moe_ep_barrier,
+            use_ue8m0=use_ue8m0,
         )
         self.handle = states["handle"]
         self.tokens_per_expert = states["tokens_per_expert"]
@@ -396,6 +400,7 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
         token_weights: paddle.Tensor,
         fp8_dispatch: bool,
         async_finish: bool = False,
+        use_ue8m0: bool = False,
     ):
         return self._comm_manager.dispatch_overlap(
             hidden_states,
@@ -403,6 +408,7 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
             token_weights,
             fp8_dispatch,
             async_finish,
+            use_ue8m0=use_ue8m0,
         )
 
     def token_dispatch(
@@ -410,9 +416,10 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
         hidden_states: paddle.Tensor,
         fp8_dispatch: bool,
         async_finish: bool = False,
+        use_ue8m0: bool = False,
     ):
         return self._comm_manager.dispatch(
-            hidden_states, fp8_dispatch, async_finish
+            hidden_states, fp8_dispatch, async_finish, use_ue8m0=use_ue8m0
         )
 
     def dispatch_postprocess(

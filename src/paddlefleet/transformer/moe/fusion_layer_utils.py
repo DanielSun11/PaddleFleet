@@ -93,6 +93,8 @@ class UnZipNode:
             hidden_states, scale = hs_2d_dispatched, None
 
         with paddle.amp.auto_cast(False):
+            print("[sd debug] moe_permute  scale dtype: ", scale.dtype)
+            use_ue8m0 = scale is not None and scale.dtype == paddle.int32
             (
                 unzipped_tokens,
                 zipped_expertwise_rowmap,
@@ -106,6 +108,7 @@ class UnZipNode:
                 num_experts=num_experts,
                 tokens_per_expert=tokens_per_expert,
                 padding_alignment=FP8_ALIGN,
+                using_ue8m0_scale=use_ue8m0,
             )
 
         if scale is None:
@@ -244,6 +247,7 @@ class MlpNode:
         use_fp8_mlp=True,
         moe_deep_gemm=True,
         moe_grouped_gemm=False,
+        use_ue8m0=False,
     ):
         """
         Constructor
@@ -286,6 +290,7 @@ class MlpNode:
                 "moe_expert_fusion = False is not supported currently"
             )
         else:
+            print("[sd debug] use_ue8m0 = ",use_ue8m0)
             self.experts_group_gemm_node = ExpertsGroupGemmContiguousNode(
                 custom_map,
                 recompute_moe_gate_up=recompute_moe_gate_up,
@@ -295,6 +300,7 @@ class MlpNode:
                 use_fp8_mlp=use_fp8_mlp,
                 moe_deep_gemm=moe_deep_gemm,
                 moe_grouped_gemm=moe_grouped_gemm,
+                use_ue8m0=use_ue8m0,
             )
         self.unzip_node = UnZipNode(self.token_dispatcher)
         self.zip_node = ZipNode(self.token_dispatcher)
@@ -590,6 +596,7 @@ class FusionMoePyLayer(paddle.autograd.PyLayer):
         use_bf16_gemm_weight_grad=False,
         is_first_fwd=False,
         fp8_dispatched_handle=None,
+        use_ue8m0=False,
     ):
         """
         根据给定的参数执行前向传播操作。
@@ -615,6 +622,7 @@ class FusionMoePyLayer(paddle.autograd.PyLayer):
             use_fp8_mlp=use_fp8_mlp,
             moe_deep_gemm=moe_deep_gemm,
             moe_grouped_gemm=moe_grouped_gemm,
+            use_ue8m0=use_ue8m0,
         )
 
         if fp8_dispatched_handle is not None:

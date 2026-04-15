@@ -30,6 +30,7 @@ try:
         fuse_stack_fp8_quant,
         fuse_stack_transpose_fp8_quant,
         fuse_weighted_swiglu_fp8_quant,
+        fuse_transpose_split_fp8_quant,
     )
 except (ImportError, RuntimeError):
     pass
@@ -143,7 +144,7 @@ def fused_stack_quant(expert_weight_list, transpose=False, use_ue8m0=False):
 
 
 def split_group_gemm(
-    x_fp8, x_scale, w_fp8, w_scale, tokens_per_expert, gemm_out
+    x_fp8, x_scale, w_fp8, w_scale, tokens_per_expert, gemm_out, use_ue8m0=False
 ):
     """
     将输入的张量分割成多个小的矩阵乘
@@ -155,10 +156,13 @@ def split_group_gemm(
         w_scale (List[paddle.Tensor], length=6): 与w_fp8对应的缩放因子。
         tokens_per_expert (List[int], length=6): 每个专家处理的token数量。
         gemm_out (paddle.Tensor, shape=(N, T)): 存储结果的张量。
+        use_ue8m0 (bool): Whether to use UE8M0 scale format (requires Blackwell GPU).
 
     Returns:
         paddle.Tensor, shape=(N, T): 返回计算结果存储在gemm_out中的张量。
     """
+    print("[sd] debug split_group_gemm use_ue8m0 ", use_ue8m0)
+    assert use_ue8m0
     start_idx = 0
     for i, token_num in enumerate(tokens_per_expert):
         if token_num == 0:
@@ -167,11 +171,20 @@ def split_group_gemm(
 
         x_scale_tma_align = x_scale[start_idx:end_idx].T.contiguous().T
 
-        deep_gemm.fp8_gemm_nt(
-            (x_fp8[start_idx:end_idx], x_scale_tma_align),
-            (w_fp8[i], w_scale[i]),
-            gemm_out[start_idx:end_idx],
-        )
+        if use_ue8m0:
+            # ue8m0: weight scale needs TMA alignment (double transpose for contiguity)
+            w_scale_tma_align = w_scale[i].T.contiguous().T
+            deep_gemm.gemm_fp8_fp8_bf16_nt(
+                (x_fp8[start_idx:end_idx], x_scale_tma_align),
+                (w_fp8[i], w_scale_tma_align),
+                gemm_out[start_idx:end_idx],
+            )
+        else:
+            deep_gemm.fp8_gemm_nt(
+                (x_fp8[start_idx:end_idx], x_scale_tma_align),
+                (w_fp8[i], w_scale[i]),
+                gemm_out[start_idx:end_idx],
+            )
 
         start_idx = end_idx
 
@@ -255,6 +268,7 @@ class ExpertsGroupGemmContiguousNode:
         use_fp8_mlp=True,
         moe_deep_gemm=True,
         moe_grouped_gemm=False,
+        use_ue8m0=False,
     ):
         """
             Initializes the experts group gemm contiguous node.
@@ -264,6 +278,7 @@ class ExpertsGroupGemmContiguousNode:
             recompute_moe_gate_up (bool, optional): Whether to recompute forward gate up. Defaults to False.
             dequant_input (bool, optional): Whether to dequantize input. Defaults to False.
             name (str, optional): Name of the node. Defaults to "experts_group_gemm_contiguous_node".
+            use_ue8m0 (bool, optional): Whether to use UE8M0 scale format. Requires Blackwell GPU. Defaults to False.
         """
         if not moe_grouped_gemm or use_fp8_mlp:
             if expert_id is None:
@@ -295,6 +310,11 @@ class ExpertsGroupGemmContiguousNode:
         self.use_fp8_mlp = use_fp8_mlp
         self.moe_deep_gemm = moe_deep_gemm
         self.moe_grouped_gemm = moe_grouped_gemm
+        self.use_ue8m0 = use_ue8m0
+        if self.use_ue8m0:
+            assert paddle.device.cuda.get_device_capability()[0] == 10, (
+                "use_ue8m0 requires Blackwell GPU (SM100, compute capability 10.x)."
+            )
 
     def cached_tensors(self):
         """
@@ -435,7 +455,7 @@ class ExpertsGroupGemmContiguousNode:
         if self.moe_grouped_gemm:
             self.m_indices = self.gen_m_indices(tokens_per_expert)
         # concat w1, shape is [num_groups, n, k]
-        w1_t_quant, w1_t_scale = fused_stack_quant(expert_w1, transpose=True)
+        w1_t_quant, w1_t_scale = fused_stack_quant(expert_w1, transpose=True, use_ue8m0=self.use_ue8m0)
         w1_t_quant = w1_t_quant.reshape([num_expert, -1, w1_t_quant.shape[-1]])
         w1_t_scale = w1_t_scale.reshape([num_expert, -1, w1_t_scale.shape[-1]])
 
@@ -470,6 +490,7 @@ class ExpertsGroupGemmContiguousNode:
                 output_scale_transpose=True,
                 quant_method="1x128",
                 input_transpose=False,
+                using_ue8m0_scale=self.use_ue8m0,
             )
             x_scale = x_scale.T
 
@@ -486,8 +507,12 @@ class ExpertsGroupGemmContiguousNode:
                     w1_t_scale,
                     tokens_per_expert,
                     o1,
+                    use_ue8m0=self.use_ue8m0,
                 )
             else:
+                if self.use_ue8m0:
+                    # ue8m0: grouped gemm scale needs extra transpose for TMA alignment
+                    w1_t_scale = w1_t_scale.transpose([0, 2, 1]).contiguous().transpose([0, 2, 1])
                 paddlefleet_deep_gemm.m_grouped_fp8_gemm_nt_contiguous(
                     (x_fp8, x_scale),
                     (w1_t_quant, w1_t_scale),
@@ -575,13 +600,12 @@ class ExpertsGroupGemmContiguousNode:
         [m_sum, k] = [m_sum, n] * [num_groups, n, k]
         """
         # concat and transpose w2
-        w2_quant, w2_scale = fused_stack_quant(expert_w2, transpose=True)
+        w2_quant, w2_scale = fused_stack_quant(expert_w2, transpose=True, use_ue8m0=self.use_ue8m0)
         w2_quant = w2_quant.reshape([num_expert, -1, w2_quant.shape[-1]])
         w2_scale = w2_scale.reshape([num_expert, -1, w2_scale.shape[-1]])
 
-        # TODO:support ue8m0 on SM100
         o2_fp8, o2_scale = fuse_weighted_swiglu_fp8_quant(
-            o1, unzipped_probs, using_pow2_scaling=True, use_ue8m0=False
+            o1, unzipped_probs, using_pow2_scaling=True, use_ue8m0=self.use_ue8m0
         )
         o2_scale = paddle.transpose(
             paddle.transpose(o2_scale, [1, 0]).contiguous(), [1, 0]
@@ -606,8 +630,12 @@ class ExpertsGroupGemmContiguousNode:
                     w2_scale,
                     self.tokens_per_expert,
                     o3,
+                    use_ue8m0=self.use_ue8m0,
                 )
             else:
+                if self.use_ue8m0:
+                    # ue8m0: grouped gemm scale needs extra transpose for TMA alignment
+                    w2_scale = w2_scale.transpose([0, 2, 1]).contiguous().transpose([0, 2, 1])
                 paddlefleet_deep_gemm.m_grouped_fp8_gemm_nt_contiguous(
                     (o2_fp8, o2_scale),
                     (w2_quant, w2_scale),
@@ -681,7 +709,7 @@ class ExpertsGroupGemmContiguousNode:
         [m_sum, n] = [m_sum, k] * [num_groups, k, n]
         """
         # recompute concated_w2_2d
-        bw_w2_quant, bw_w2_scale = fused_stack_quant(expert_w2, transpose=False)
+        bw_w2_quant, bw_w2_scale = fused_stack_quant(expert_w2, transpose=False, use_ue8m0=self.use_ue8m0)
         bw_w2_quant = bw_w2_quant.reshape(
             [len(expert_w2), -1, bw_w2_quant.shape[-1]]
         )
@@ -706,6 +734,7 @@ class ExpertsGroupGemmContiguousNode:
                 output_scale_transpose=True,
                 quant_method="1x128",
                 input_transpose=False,
+                using_ue8m0_scale=self.use_ue8m0,
             )
         )
         unzipped_grad_scale = unzipped_grad_scale.T
@@ -723,8 +752,11 @@ class ExpertsGroupGemmContiguousNode:
                     bw_w2_scale,
                     self.tokens_per_expert,
                     do2_s,
+                    use_ue8m0=self.use_ue8m0,
                 )
             else:
+                if self.use_ue8m0:
+                    bw_w2_scale = bw_w2_scale.transpose([0, 2, 1]).contiguous().transpose([0, 2, 1])
                 paddlefleet_deep_gemm.m_grouped_fp8_gemm_nt_contiguous(
                     (unzipped_grad_fp8, unzipped_grad_scale),
                     (bw_w2_quant, bw_w2_scale),
@@ -795,7 +827,7 @@ class ExpertsGroupGemmContiguousNode:
         [m_sum, k] = [m_sum, n] * [num_groups, n, k]
         """
         # recompute concated_w1_t
-        bw_w1_quant, bw_w1_scale = fused_stack_quant(expert_w1, transpose=False)
+        bw_w1_quant, bw_w1_scale = fused_stack_quant(expert_w1, transpose=False, use_ue8m0=self.use_ue8m0)
         bw_w1_quant = bw_w1_quant.reshape(
             [len(expert_w1), -1, bw_w1_quant.shape[-1]]
         )
@@ -819,6 +851,7 @@ class ExpertsGroupGemmContiguousNode:
             output_scale_transpose=True,
             quant_method="1x128",
             input_transpose=False,
+            using_ue8m0_scale=self.use_ue8m0,
         )
         do1_scale = do1_scale.T
 
@@ -838,8 +871,11 @@ class ExpertsGroupGemmContiguousNode:
                     bw_w1_scale,
                     self.tokens_per_expert,
                     dx,
+                    use_ue8m0=self.use_ue8m0,
                 )
             else:
+                if self.use_ue8m0:
+                    bw_w1_scale = bw_w1_scale.transpose([0, 2, 1]).contiguous().transpose([0, 2, 1])
                 paddlefleet_deep_gemm.m_grouped_fp8_gemm_nt_contiguous(
                     (do1_fp8, do1_scale),
                     (bw_w1_quant, bw_w1_scale),
@@ -852,10 +888,29 @@ class ExpertsGroupGemmContiguousNode:
     def fused_transpose_split_quant(
         self, x, scale, tokens_per_expert, pow_2_scales
     ):
-        out, scale = paddle.incubate.nn.functional.fused_transpose_split_quant(
-            x, scale, tokens_per_expert, pow_2_scales
-        )
-        return out, scale
+        if self.use_ue8m0:
+            def _ceil_div(a, b):
+                return (a + b - 1) // b
+            def _align(a, b):
+                return _ceil_div(a, b) * b
+            def _tma_aligned_size(n, element_size):
+                return _align(n, 16 // element_size)
+
+            out_list, scale_list = [], []
+            for tokens in tokens_per_expert:
+                out_list.append(paddle.empty([x.shape[1], tokens], dtype="float8_e4m3fn"))
+                aligned_mn = _tma_aligned_size(x.shape[1], 4)  # int32 element_size=4
+                aligned_k = _ceil_div(tokens, 128 * 4)
+                scale_list.append(paddle.empty([aligned_k, aligned_mn], dtype="int32"))
+            fuse_transpose_split_fp8_quant(
+                x, None, out_list, scale_list, tokens_per_expert, pow_2_scales, True
+            )
+            return out_list, scale_list
+        else:
+            out, scale = paddle.incubate.nn.functional.fused_transpose_split_quant(
+                x, scale, tokens_per_expert, pow_2_scales
+            )
+            return out, scale
 
     def bwd_down_weight(self, do3, o2, expert_w2):
         """
@@ -875,31 +930,49 @@ class ExpertsGroupGemmContiguousNode:
                     expert_w2[i].main_grad = paddle.zeros(
                         shape=expert_w2[i].shape, dtype=paddle.float32
                     )
-                kitchen_gemm(
-                    o2_t_fp8[i],
-                    o2_t_scale[i],
-                    do3_t_fp8[i],
-                    do3_t_scale[i],
-                    True,
-                    True,
-                    expert_w2[i].main_grad,
-                    paddle.float32,
-                )
+                if self.use_ue8m0:
+                    if o2_t_fp8[i].shape[1] != 0:
+                        deep_gemm.gemm_fp8_fp8_bf16_nt(
+                            (o2_t_fp8[i], o2_t_scale[i].T),
+                            (do3_t_fp8[i], do3_t_scale[i].T),
+                            expert_w2[i].main_grad,
+                            expert_w2[i].main_grad,
+                        )
+                else:
+                    kitchen_gemm(
+                        o2_t_fp8[i],
+                        o2_t_scale[i],
+                        do3_t_fp8[i],
+                        do3_t_scale[i],
+                        True,
+                        True,
+                        expert_w2[i].main_grad,
+                        paddle.float32,
+                    )
             else:
                 if expert_w2[i].grad is None:
                     expert_w2[i].grad = paddle.zeros(
                         shape=expert_w2[i].shape, dtype=paddle.float32
                     )
-                kitchen_gemm(
-                    o2_t_fp8[i],
-                    o2_t_scale[i],
-                    do3_t_fp8[i],
-                    do3_t_scale[i],
-                    True,
-                    True,
-                    expert_w2[i].grad,
-                    paddle.float32,
-                )
+                if self.use_ue8m0:
+                    if o2_t_fp8[i].shape[1] != 0:
+                        deep_gemm.gemm_fp8_fp8_bf16_nt(
+                            (o2_t_fp8[i], o2_t_scale[i].T),
+                            (do3_t_fp8[i], do3_t_scale[i].T),
+                            expert_w2[i].grad,
+                            expert_w2[i].grad,
+                        )
+                else:
+                    kitchen_gemm(
+                        o2_t_fp8[i],
+                        o2_t_scale[i],
+                        do3_t_fp8[i],
+                        do3_t_scale[i],
+                        True,
+                        True,
+                        expert_w2[i].grad,
+                        paddle.float32,
+                    )
             if (
                 hasattr(expert_w2[i], "_apply_backward_hook")
                 and not expert_w2[i].stop_gradient
@@ -914,14 +987,24 @@ class ExpertsGroupGemmContiguousNode:
 
         if input_x is None:
             if self.dequant_input:
-                input_x_t_fp8, input_x_t_scale = (
-                    self.fused_transpose_split_quant(
-                        self.input_fp8,
-                        self.input_scale,
-                        self.tokens_per_expert,
-                        True,
+                if self.use_ue8m0:
+                    # ue8m0: int32 scale cannot be passed to fused_transpose_split_quant;
+                    # dequantize back to bf16 first, then re-quantize
+                    input_x = paddle.incubate.nn.functional.fused_act_dequant(
+                        self.input_fp8, self.input_scale
                     )
-                )
+                    input_x_t_fp8, input_x_t_scale = self.fused_transpose_split_quant(
+                        input_x, None, self.tokens_per_expert, True
+                    )
+                else:
+                    input_x_t_fp8, input_x_t_scale = (
+                        self.fused_transpose_split_quant(
+                            self.input_fp8,
+                            self.input_scale,
+                            self.tokens_per_expert,
+                            True,
+                        )
+                    )
             else:
                 input_x_t_fp8, input_x_t_scale = (
                     self.fused_transpose_split_quant(
@@ -948,31 +1031,49 @@ class ExpertsGroupGemmContiguousNode:
                     expert_w1[i].main_grad = paddle.zeros(
                         shape=expert_w1[i].shape, dtype=paddle.float32
                     )
-                kitchen_gemm(
-                    input_x_t_fp8[i],
-                    input_x_t_scale[i],
-                    do1_t_fp8[i],
-                    do1_t_scale[i],
-                    True,
-                    True,
-                    expert_w1[i].main_grad,
-                    paddle.float32,
-                )
+                if self.use_ue8m0:
+                    if input_x_t_fp8[i].shape[1] != 0:
+                        deep_gemm.gemm_fp8_fp8_bf16_nt(
+                            (input_x_t_fp8[i], input_x_t_scale[i].T),
+                            (do1_t_fp8[i], do1_t_scale[i].T),
+                            expert_w1[i].main_grad,
+                            expert_w1[i].main_grad,
+                        )
+                else:
+                    kitchen_gemm(
+                        input_x_t_fp8[i],
+                        input_x_t_scale[i],
+                        do1_t_fp8[i],
+                        do1_t_scale[i],
+                        True,
+                        True,
+                        expert_w1[i].main_grad,
+                        paddle.float32,
+                    )
             else:
                 if expert_w1[i].grad is None:
                     expert_w1[i].grad = paddle.zeros(
                         shape=expert_w1[i].shape, dtype=paddle.float32
                     )
-                kitchen_gemm(
-                    input_x_t_fp8[i],
-                    input_x_t_scale[i],
-                    do1_t_fp8[i],
-                    do1_t_scale[i],
-                    True,
-                    True,
-                    expert_w1[i].grad,
-                    paddle.float32,
-                )
+                if self.use_ue8m0:
+                    if input_x_t_fp8[i].shape[1] != 0:
+                        deep_gemm.gemm_fp8_fp8_bf16_nt(
+                            (input_x_t_fp8[i], input_x_t_scale[i].T),
+                            (do1_t_fp8[i], do1_t_scale[i].T),
+                            expert_w1[i].grad,
+                            expert_w1[i].grad,
+                        )
+                else:
+                    kitchen_gemm(
+                        input_x_t_fp8[i],
+                        input_x_t_scale[i],
+                        do1_t_fp8[i],
+                        do1_t_scale[i],
+                        True,
+                        True,
+                        expert_w1[i].grad,
+                        paddle.float32,
+                    )
             if (
                 hasattr(expert_w1[i], "_apply_backward_hook")
                 and not expert_w1[i].stop_gradient
