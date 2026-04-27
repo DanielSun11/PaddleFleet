@@ -14,13 +14,13 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import TYPE_CHECKING
 
 import numpy as np
 import paddle
+from paddle.distributed.fleet.meta_parallel import LayerSpec
 from paddle.nn.functional import layer_norm, rms_norm
-
-from ..spec_utils import LayerSpec
 
 try:
     from paddle.distributed.fleet.utils.sequence_parallel_utils import (
@@ -33,8 +33,9 @@ except ImportError:
         return parameter
 
 
+from paddle.distributed.fleet.meta_parallel import ScheduleNode
+
 from paddlefleet.jit import jit_fuser
-from paddlefleet.pipeline_parallel import ScheduleNode
 
 if TYPE_CHECKING:
     from paddle import Tensor
@@ -150,6 +151,44 @@ class FusedRMSNorm(RMSNorm):
             return rms_norm_out.astype(self.weight.dtype)
 
 
+class RMSNormTriton(RMSNorm):
+    """Wrapper for triton RMSNorm, used for fused QK norm."""
+
+    def forward(self, hidden_states: Tensor):
+        from paddlefleet.ops.triton_ops.rms_norm_fusion import (
+            RMSNormFusionTriton,
+        )
+
+        return RMSNormFusionTriton.apply(
+            hidden_states, self.weight, self.variance_epsilon
+        )
+
+
+class WrappedRMSNormTriton:
+    """Factory class for RMSNormTriton, handles parameter name conversion.
+
+    Converts build_spec_layer parameters (hidden_size, eps) to
+    RMSNorm parameters (normalized_shape, norm_eps).
+    """
+
+    def __new__(
+        cls,
+        config: TransformerConfig,
+        hidden_size: int,
+        eps: float = 1e-5,
+        input_is_parallel: bool | None = None,
+        **kwargs,
+    ):
+        return RMSNormTriton(
+            config=config,
+            normalized_shape=hidden_size,
+            norm_eps=eps,
+            input_is_parallel=input_is_parallel
+            if input_is_parallel is not None
+            else False,
+        )
+
+
 class WrappedPaddleNorm:
     def __new__(
         cls,
@@ -232,6 +271,22 @@ class WrappedPaddleNormPipe(paddle.nn.Layer):
             )
             rst["hidden_states"] = hidden_states_concat
         rst = {**dict_args, **rst}
+
+        # Loss-path MD5 probe: final_layernorm output
+        if (
+            os.environ.get("LOG_LAYER_MD5", "0") == "1"
+            or os.environ.get("LOG_LOSS_MD5", "0") == "1"
+        ):
+            import hashlib
+
+            rank = paddle.distributed.get_rank()
+            h = rst["hidden_states"]
+            md5 = hashlib.md5(h.cast("float32").numpy().tobytes()).hexdigest()
+            print(
+                f"[LOSS_PATH_MD5] rank={rank} final_layernorm_output shape={list(h.shape)} md5={md5}",
+                flush=True,
+            )
+
         return rst
 
     def build_schedule_node(self):

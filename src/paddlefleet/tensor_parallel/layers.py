@@ -473,7 +473,7 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
             main_grad = weight.main_grad
         else:
             main_grad = None
-        ctx.save_for_backward(input, weight)
+        ctx.save_for_backward(input._new_shared_tensor(), weight)
         # We can't save main_grad in save_for_backward as this module would be
         # reused across layers like MTP logits. So, to prevent in-place modification
         # checks we save the tensor in ctx.
@@ -1004,7 +1004,7 @@ class Linear(paddle.nn.Layer):
         return None
 
     def __repr__(self):
-        use_bias = self.bias is not None and self.bias is True
+        use_bias = self.bias is not None
         return (
             f"{type(self).__name__}(in_features={self.input_size}, "
             f"out_features={self.output_size}, bias={use_bias}, TP=1)"
@@ -1347,7 +1347,7 @@ class ColumnParallelLinear(paddle.nn.Layer):
 
     def __repr__(self):
         tp = self.output_size // self.output_size_per_partition
-        use_bias = self.bias is not None and self.bias is True
+        use_bias = self.bias is not None
         return (
             f"{type(self).__name__}(in_features={self.input_size}, "
             f"out_features={self.output_size}, bias={use_bias}, TP={tp})"
@@ -1601,7 +1601,7 @@ class RowParallelLinear(paddle.nn.Layer):
 
     def __repr__(self):
         tp = self.input_size // self.input_size_per_partition
-        use_bias = self.bias is not None and self.bias is True
+        use_bias = self.bias is not None
         return (
             f"{type(self).__name__}(in_features={self.input_size}, "
             f"out_features={self.output_size}, bias={use_bias}, TP={tp})"

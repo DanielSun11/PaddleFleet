@@ -29,8 +29,8 @@ env:
   BRANCH: ${{ github.event.pull_request.base.ref || github.ref_name }}
   no_proxy: "bcebos.com,.bcebos.com,apiin.im.baidu.com,gitee.com,aliyun.com,.baidu.com,.tuna.tsinghua.edu.cn"
   docker_image_cu126: "ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddle:cuda126-dev"
-  docker_image_cu129: "ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddle:cuda129-coverage-test"
-  docker_image_cu130: "ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddle:cuda130-dev"
+  docker_image_cu129: "ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddle:ubuntu24-cuda129-py312-dev"
+  docker_image_cu130: "ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddle:ubuntu24-cuda130-py312-dev"
   paddle_url_cu126: "https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-TagBuild-Training-Linux-Gpu-Cuda12.6-Cudnn9.5-Trt10.5-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl"
   paddle_url_cu129: "https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-TagBuild-Training-Linux-Gpu-Cuda12.9-Cudnn9.9-Trt10.5-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/"
   paddle_url_cu130: "https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-TagBuild-Training-Linux-Gpu-Cuda130-Cudnn913-Trt1013-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl"
@@ -70,10 +70,12 @@ jobs:
     steps:
       - name: Determine the runner
         run: |
-          gpu_id=$(( $(echo $PWD | awk -F'/' '{print $3}' | awk -F'-' '{print $2}') + 3 ))
+          gpu_id=$(( $(echo $PWD | awk -F'/' '{print $3}' | awk -F'-' '{print $2}') - 1 ))
           cuda=${{ matrix.cuda }}
           python_version=${{ matrix.python }}
           echo GPU_DEVICES="$gpu_id" >> $GITHUB_ENV
+          # 使用 workflow 开始时间作为统一日期，避免跨天后路径不一致
+          echo DATE="$(date -d '${{ github.run_started_at }}' +%Y%m%d)" >> $GITHUB_ENV
           if [ "${cuda}" == "12.9" ]; then
             docker_image=${docker_image_cu129}
             cuda_version="cu129"
@@ -122,6 +124,7 @@ jobs:
             -e CUDA_VERSION \
             -e PYTHON_VERSION \
             -e PADDLE_URL \
+            -e DATE \
             -e GITHUB_HEAD_REF="${{ github.head_ref }}" \
             -e GITHUB_REPO_NAME="${{ github.repository }}" \
             -e GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}" \
@@ -137,20 +140,15 @@ jobs:
           source /root/proxy
           mkdir -p /home/.cache/pip
           pip cache dir
-          if [ ${PYTHON_VERSION} != "3.10" ]; then
-            wget https://mirrors.tuna.tsinghua.edu.cn/anaconda/miniconda/Miniconda3-latest-Linux-x86_64.sh -O miniconda.sh
-            bash miniconda.sh -b -p $HOME/miniconda -u
-            source "$HOME/miniconda/etc/profile.d/conda.sh"
-            conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
-            conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
-            conda init bash
-            conda create -n python${PYTHON_VERSION} python=${PYTHON_VERSION} -y
-            conda activate python${PYTHON_VERSION}
-            paddle_whl=paddlepaddle_gpu-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
-            paddle_url="${PADDLE_URL}${paddle_whl}"
-          else
-            paddle_url=${PADDLE_URL}
-          fi
+          wget https://mirrors.tuna.tsinghua.edu.cn/anaconda/miniconda/Miniconda3-latest-Linux-x86_64.sh -O miniconda.sh
+          bash miniconda.sh -b -p $HOME/miniconda -u
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
+          conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
+          conda init bash
+          conda create -n python${PYTHON_VERSION} python=${PYTHON_VERSION} -y
+          conda activate python${PYTHON_VERSION}
+          paddle_url=${PADDLE_URL}
           if [ ${CUDA_VERSION} == "cu129" ]; then
             paddle_whl=paddlepaddle_gpu-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
             paddle_url="${PADDLE_URL}${paddle_whl}"
@@ -218,7 +216,7 @@ jobs:
             -O bos_tools.py
           push_file=$(realpath bos_tools.py)
           cp /paddle/PaddleFleet/coveragedata/coverage.xml coverage.xml
-          target_path="paddle-github-action/${GITHUB_REPO_NAME}/ce/$(date +%Y%m%d)/single-card"
+          target_path="paddle-github-action/${GITHUB_REPO_NAME}/ce/${DATE}/single-card"
           python ${push_file} coverage.xml ${target_path}
           '
       - name: Terminate and delete the container
@@ -274,6 +272,8 @@ jobs:
           echo "CUDA_VERSION=${cuda_version}" >> $GITHUB_ENV
           echo "PYTHON_VERSION=${python_version}" >> $GITHUB_ENV
           echo "PADDLE_URL=${paddle_url}" >> $GITHUB_ENV
+          # 使用 workflow 开始时间作为统一日期，避免跨天后路径不一致
+          echo "DATE=$(date -d '${{ github.run_started_at }}' +%Y%m%d)" >> $GITHUB_ENV
       - name: Check docker image and run container
         env:
           DOCKER_IMAGE: ${{ env.DOCKER_IMAGE }}
@@ -304,6 +304,7 @@ jobs:
             -e CUDA_VERSION \
             -e PYTHON_VERSION \
             -e PADDLE_URL \
+            -e DATE \
             -e GITHUB_SHA="${{ github.event.pull_request.head.sha }}" \
             -e GITHUB_HEAD_REF="${{ github.head_ref }}" \
             -e GITHUB_REPO_NAME="${{ github.repository }}" \
@@ -319,20 +320,15 @@ jobs:
           rm -rf * .[^.]*
           source /root/proxy
           pip install --upgrade pip
-          if [ ${PYTHON_VERSION} != "3.10" ]; then
-            wget https://mirrors.tuna.tsinghua.edu.cn/anaconda/miniconda/Miniconda3-latest-Linux-x86_64.sh -O miniconda.sh
-            bash miniconda.sh -b -p $HOME/miniconda -u
-            source "$HOME/miniconda/etc/profile.d/conda.sh"
-            conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
-            conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
-            conda init bash
-            conda create -n python${PYTHON_VERSION} python=${PYTHON_VERSION} -y
-            conda activate python${PYTHON_VERSION}
-            paddle_whl=paddlepaddle_gpu-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
-            paddle_url="${PADDLE_URL}${paddle_whl}"
-          else
-            paddle_url=${PADDLE_URL}
-          fi
+          wget https://mirrors.tuna.tsinghua.edu.cn/anaconda/miniconda/Miniconda3-latest-Linux-x86_64.sh -O miniconda.sh
+          bash miniconda.sh -b -p $HOME/miniconda -u
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
+          conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
+          conda init bash
+          conda create -n python${PYTHON_VERSION} python=${PYTHON_VERSION} -y
+          conda activate python${PYTHON_VERSION}
+          paddle_url=${PADDLE_URL}
           if [ ${CUDA_VERSION} == "cu129" ]; then
             paddle_whl=paddlepaddle_gpu-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
             paddle_url="${PADDLE_URL}${paddle_whl}"
@@ -358,10 +354,8 @@ jobs:
       - name: Multi-card test
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
-          if [ ${PYTHON_VERSION} != "3.10" ]; then
-            source "$HOME/miniconda/etc/profile.d/conda.sh"
-            conda activate python${PYTHON_VERSION}
-          fi
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${PYTHON_VERSION}
           echo "Paddle Commit"
           python -c "import paddle; print(paddle.version.commit)"
           echo "PaddleFleet Commit"
@@ -391,7 +385,7 @@ jobs:
             -O bos_tools.py
           push_file=$(realpath bos_tools.py)
           cp /paddle/PaddleFleet/coveragedata/coverage.xml coverage.xml
-          target_path="paddle-github-action/${GITHUB_REPO_NAME}/ce/$(date +%Y%m%d)/multi-card"
+          target_path="paddle-github-action/${GITHUB_REPO_NAME}/ce/${DATE}/multi-card"
           python ${push_file} coverage.xml ${target_path}
           '
 
@@ -430,7 +424,7 @@ jobs:
     steps:
       - name: Determine the runner
         run: |
-          gpu_id=$(( $(echo $PWD | awk -F'/' '{print $3}' | awk -F'-' '{print $2}') + 3 ))
+          gpu_id=$(( $(echo $PWD | awk -F'/' '{print $3}' | awk -F'-' '{print $2}') - 1 ))
           cuda=${{ matrix.cuda }}
           python_version=${{ matrix.python }}
           echo GPU_DEVICES="$gpu_id" >> $GITHUB_ENV
@@ -452,6 +446,8 @@ jobs:
           echo "PYTHON_VERSION=${python_version}" >> $GITHUB_ENV
           echo "PADDLE_URL=${paddle_url}" >> $GITHUB_ENV
           echo "BASE_NAME=${cuda_version}-${python_version}-H20" >> $GITHUB_ENV
+          # 使用 workflow 开始时间作为统一日期，避免跨天后路径不一致
+          echo "DATE=$(date -d '${{ github.run_started_at }}' +%Y%m%d)" >> $GITHUB_ENV
       - name: Check docker image and run container
         env:
           GPU_DEVICES: ${{ env.GPU_DEVICES }}
@@ -484,6 +480,7 @@ jobs:
             -e PYTHON_VERSION \
             -e PADDLE_URL \
             -e BASE_NAME \
+            -e DATE \
             -e GITHUB_SHA="${{ github.event.pull_request.head.sha }}" \
             -e GITHUB_HEAD_REF="${{ github.head_ref }}" \
             -e GITHUB_REPO_NAME="${{ github.repository }}" \
@@ -502,16 +499,14 @@ jobs:
           mkdir -p /home/.cache/pip
           pip cache dir
           pip install --upgrade pip
-          if [ ${PYTHON_VERSION} != "3.10" ]; then
-            wget https://mirrors.tuna.tsinghua.edu.cn/anaconda/miniconda/Miniconda3-latest-Linux-x86_64.sh -O miniconda.sh
-            bash miniconda.sh -b -p $HOME/miniconda -u
-            source "$HOME/miniconda/etc/profile.d/conda.sh"
-            conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
-            conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
-            conda init bash
-            conda create -n python${PYTHON_VERSION} python=${PYTHON_VERSION} -y
-            conda activate python${PYTHON_VERSION}
-          fi
+          wget https://mirrors.tuna.tsinghua.edu.cn/anaconda/miniconda/Miniconda3-latest-Linux-x86_64.sh -O miniconda.sh
+          bash miniconda.sh -b -p $HOME/miniconda -u
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
+          conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
+          conda init bash
+          conda create -n python${PYTHON_VERSION} python=${PYTHON_VERSION} -y
+          conda activate python${PYTHON_VERSION}
           git clone https://github.com/PaddlePaddle/PaddleFleet.git
           cd PaddleFleet
           git config --global --add safe.directory /workspace/PaddleFleet
@@ -529,14 +524,9 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          if [ "${PYTHON_VERSION}" != "3.10" ]; then
-            source "$HOME/miniconda/etc/profile.d/conda.sh"
-            conda activate python${PYTHON_VERSION}
-            paddle_whl=paddlepaddle_gpu-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
-            paddle_url="${PADDLE_URL}${paddle_whl}"
-          else
-            paddle_url=${PADDLE_URL}
-          fi
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${PYTHON_VERSION}
+          paddle_url=${PADDLE_URL}
           if [ ${CUDA_VERSION} == "cu129" ]; then
             paddle_whl=paddlepaddle_gpu-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
             paddle_url="${PADDLE_URL}${paddle_whl}"
@@ -573,10 +563,8 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          if [ "${PYTHON_VERSION}" != "3.10" ]; then
-            source "$HOME/miniconda/etc/profile.d/conda.sh"
-            conda activate python${PYTHON_VERSION}
-          fi
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${PYTHON_VERSION}
           bash -x PaddleFormers/tests/integration_test/preprocess.sh
           preprocess_exit_code=$?
           if [[ "$preprocess_exit_code" != "0" ]]; then
@@ -592,10 +580,8 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
-          if [ "${PYTHON_VERSION}" != "3.10" ]; then
-            source "$HOME/miniconda/etc/profile.d/conda.sh"
-            conda activate python${PYTHON_VERSION}
-          fi
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${PYTHON_VERSION}
           mkdir -p /workspace/PaddleFleet/coveragedata-single
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-single/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
@@ -614,10 +600,8 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
-          if [ "${PYTHON_VERSION}" != "3.10" ]; then
-            source "$HOME/miniconda/etc/profile.d/conda.sh"
-            conda activate python${PYTHON_VERSION}
-          fi
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${PYTHON_VERSION}
           mkdir -p /workspace/PaddleFleet/coveragedata-single
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-single/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
@@ -636,10 +620,8 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
-          if [ "${PYTHON_VERSION}" != "3.10" ]; then
-            source "$HOME/miniconda/etc/profile.d/conda.sh"
-            conda activate python${PYTHON_VERSION}
-          fi
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${PYTHON_VERSION}
           mkdir -p /workspace/PaddleFleet/coveragedata-single
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-single/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
@@ -670,7 +652,7 @@ jobs:
             -O bos_tools.py
           push_file=$(realpath bos_tools.py)
           cp /workspace/PaddleFleet/coveragedata-single/coverage.xml coverage.xml
-          target_path_single="paddle-github-action/${GITHUB_REPO_NAME}/ce/$(date +%Y%m%d)/h20-single"
+          target_path_single="paddle-github-action/${GITHUB_REPO_NAME}/ce/${DATE}/h20-single"
           python ${push_file} coverage.xml ${target_path_single}
           '
 
@@ -730,6 +712,8 @@ jobs:
           echo "PYTHON_VERSION=${python_version}" >> $GITHUB_ENV
           echo "PADDLE_URL=${paddle_url}" >> $GITHUB_ENV
           echo "BASE_NAME=${cuda_version}-${python_version}-H20" >> $GITHUB_ENV
+          # 使用 workflow 开始时间作为统一日期，避免跨天后路径不一致
+          echo "DATE=$(date -d '${{ github.run_started_at }}' +%Y%m%d)" >> $GITHUB_ENV
       - name: Check docker image and run container
         env:
           DOCKER_IMAGE: ${{ env.DOCKER_IMAGE }}
@@ -760,6 +744,7 @@ jobs:
             -e PYTHON_VERSION \
             -e PADDLE_URL \
             -e BASE_NAME \
+            -e DATE \
             -e GITHUB_SHA="${{ github.event.pull_request.head.sha }}" \
             -e GITHUB_HEAD_REF="${{ github.head_ref }}" \
             -e GITHUB_REPO_NAME="${{ github.repository }}" \
@@ -777,16 +762,14 @@ jobs:
           mkdir -p /home/.cache/pip
           pip cache dir
           pip install --upgrade pip
-          if [ ${PYTHON_VERSION} != "3.10" ]; then
-            wget https://mirrors.tuna.tsinghua.edu.cn/anaconda/miniconda/Miniconda3-latest-Linux-x86_64.sh -O miniconda.sh
-            bash miniconda.sh -b -p $HOME/miniconda -u
-            source "$HOME/miniconda/etc/profile.d/conda.sh"
-            conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
-            conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
-            conda init bash
-            conda create -n python${PYTHON_VERSION} python=${PYTHON_VERSION} -y
-            conda activate python${PYTHON_VERSION}
-          fi
+          wget https://mirrors.tuna.tsinghua.edu.cn/anaconda/miniconda/Miniconda3-latest-Linux-x86_64.sh -O miniconda.sh
+          bash miniconda.sh -b -p $HOME/miniconda -u
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
+          conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
+          conda init bash
+          conda create -n python${PYTHON_VERSION} python=${PYTHON_VERSION} -y
+          conda activate python${PYTHON_VERSION}
           git clone https://github.com/PaddlePaddle/PaddleFleet.git
           cd PaddleFleet
           git config --global --add safe.directory /workspace/PaddleFleet
@@ -804,14 +787,9 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          if [ "${PYTHON_VERSION}" != "3.10" ]; then
-            source "$HOME/miniconda/etc/profile.d/conda.sh"
-            conda activate python${PYTHON_VERSION}
-            paddle_whl=paddlepaddle_gpu-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
-            paddle_url="${PADDLE_URL}${paddle_whl}"
-          else
-            paddle_url=${PADDLE_URL}
-          fi
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${PYTHON_VERSION}
+          paddle_url=${PADDLE_URL}
           if [ ${CUDA_VERSION} == "cu129" ]; then
             paddle_whl=paddlepaddle_gpu-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
             paddle_url="${PADDLE_URL}${paddle_whl}"
@@ -849,10 +827,8 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
-          if [ "${PYTHON_VERSION}" != "3.10" ]; then
-            source "$HOME/miniconda/etc/profile.d/conda.sh"
-            conda activate python${PYTHON_VERSION}
-          fi
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${PYTHON_VERSION}
           mkdir -p /workspace/PaddleFleet/coveragedata-multi
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
@@ -871,10 +847,8 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
-          if [ "${PYTHON_VERSION}" != "3.10" ]; then
-            source "$HOME/miniconda/etc/profile.d/conda.sh"
-            conda activate python${PYTHON_VERSION}
-          fi
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${PYTHON_VERSION}
           mkdir -p /workspace/PaddleFleet/coveragedata-multi
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
@@ -888,15 +862,32 @@ jobs:
           fi
           '
 
+      - name: GLM4.5 sft cp
+        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          source /root/proxy
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${PYTHON_VERSION}
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
+          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
+          timeout 5m bash -x PaddleFormers/tests/integration_test/glm45_sft_cp.sh
+          glm45_exit_code=$?
+          if [[ "$glm45_exit_code" != "0" ]]; then
+            export case_name="glm45_sft_cp"
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+          else
+            echo -e "\033[32mIntegration test succeeded: GLM4.5 sft cp.\033[0m"
+          fi
+          '
+
       - name: GLM4.5 lora
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
-          if [ "${PYTHON_VERSION}" != "3.10" ]; then
-            source "$HOME/miniconda/etc/profile.d/conda.sh"
-            conda activate python${PYTHON_VERSION}
-          fi
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${PYTHON_VERSION}
           mkdir -p /workspace/PaddleFleet/coveragedata-multi
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
@@ -915,10 +906,8 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
-          if [ "${PYTHON_VERSION}" != "3.10" ]; then
-            source "$HOME/miniconda/etc/profile.d/conda.sh"
-            conda activate python${PYTHON_VERSION}
-          fi
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${PYTHON_VERSION}
           mkdir -p /workspace/PaddleFleet/coveragedata-multi
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
@@ -937,10 +926,8 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
-          if [ "${PYTHON_VERSION}" != "3.10" ]; then
-            source "$HOME/miniconda/etc/profile.d/conda.sh"
-            conda activate python${PYTHON_VERSION}
-          fi
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${PYTHON_VERSION}
           mkdir -p /workspace/PaddleFleet/coveragedata-multi
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
@@ -963,10 +950,8 @@ jobs:
           if [ "${CUDA_VERSION}" == "cu126" ]; then
             exit 0
           fi
-          if [ "${PYTHON_VERSION}" != "3.10" ]; then
-            source "$HOME/miniconda/etc/profile.d/conda.sh"
-            conda activate python${PYTHON_VERSION}
-          fi
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${PYTHON_VERSION}
           mkdir -p /workspace/PaddleFleet/coveragedata-multi
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
@@ -988,10 +973,8 @@ jobs:
           if [ "${CUDA_VERSION}" == "cu126" ]; then
             exit 0
           fi
-          if [ "${PYTHON_VERSION}" != "3.10" ]; then
-            source "$HOME/miniconda/etc/profile.d/conda.sh"
-            conda activate python${PYTHON_VERSION}
-          fi
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${PYTHON_VERSION}
           mkdir -p /workspace/PaddleFleet/coveragedata-multi
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
@@ -1010,10 +993,8 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
-          if [ "${PYTHON_VERSION}" != "3.10" ]; then
-            source "$HOME/miniconda/etc/profile.d/conda.sh"
-            conda activate python${PYTHON_VERSION}
-          fi
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${PYTHON_VERSION}
           mkdir -p /workspace/PaddleFleet/coveragedata-multi
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
@@ -1032,10 +1013,8 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
-          if [ "${PYTHON_VERSION}" != "3.10" ]; then
-            source "$HOME/miniconda/etc/profile.d/conda.sh"
-            conda activate python${PYTHON_VERSION}
-          fi
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${PYTHON_VERSION}
           mkdir -p /workspace/PaddleFleet/coveragedata-multi
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
@@ -1054,10 +1033,8 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
-          if [ "${PYTHON_VERSION}" != "3.10" ]; then
-            source "$HOME/miniconda/etc/profile.d/conda.sh"
-            conda activate python${PYTHON_VERSION}
-          fi
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${PYTHON_VERSION}
           mkdir -p /workspace/PaddleFleet/coveragedata-multi
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
@@ -1076,10 +1053,8 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
-          if [ "${PYTHON_VERSION}" != "3.10" ]; then
-            source "$HOME/miniconda/etc/profile.d/conda.sh"
-            conda activate python${PYTHON_VERSION}
-          fi
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${PYTHON_VERSION}
           mkdir -p /workspace/PaddleFleet/coveragedata-multi
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
@@ -1098,10 +1073,8 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
-          if [ "${PYTHON_VERSION}" != "3.10" ]; then
-            source "$HOME/miniconda/etc/profile.d/conda.sh"
-            conda activate python${PYTHON_VERSION}
-          fi
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${PYTHON_VERSION}
           mkdir -p /workspace/PaddleFleet/coveragedata-multi
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
@@ -1120,10 +1093,8 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
-          if [ "${PYTHON_VERSION}" != "3.10" ]; then
-            source "$HOME/miniconda/etc/profile.d/conda.sh"
-            conda activate python${PYTHON_VERSION}
-          fi
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${PYTHON_VERSION}
           mkdir -p /workspace/PaddleFleet/coveragedata-multi
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
@@ -1142,10 +1113,8 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
-          if [ "${PYTHON_VERSION}" != "3.10" ]; then
-            source "$HOME/miniconda/etc/profile.d/conda.sh"
-            conda activate python${PYTHON_VERSION}
-          fi
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${PYTHON_VERSION}
           mkdir -p /workspace/PaddleFleet/coveragedata-multi
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
@@ -1164,10 +1133,8 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
-          if [ "${PYTHON_VERSION}" != "3.10" ]; then
-            source "$HOME/miniconda/etc/profile.d/conda.sh"
-            conda activate python${PYTHON_VERSION}
-          fi
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${PYTHON_VERSION}
           mkdir -p /workspace/PaddleFleet/coveragedata-multi
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
@@ -1198,7 +1165,7 @@ jobs:
             -O bos_tools.py
           push_file=$(realpath bos_tools.py)
           cp /workspace/PaddleFleet/coveragedata-multi/coverage.xml coverage.xml
-          target_path_multi="paddle-github-action/${GITHUB_REPO_NAME}/ce/$(date +%Y%m%d)/h20-multi"
+          target_path_multi="paddle-github-action/${GITHUB_REPO_NAME}/ce/${DATE}/h20-multi"
           python ${push_file} coverage.xml ${target_path_multi}
           '
 
@@ -1258,6 +1225,8 @@ jobs:
           echo "PYTHON_VERSION=${python_version}" >> $GITHUB_ENV
           echo "PADDLE_URL=${paddle_url}" >> $GITHUB_ENV
           echo "BASE_NAME=${cuda_version}-${python_version}-A100" >> $GITHUB_ENV
+          # 使用 workflow 开始时间作为统一日期，避免跨天后路径不一致
+          echo "DATE=$(date -d '${{ github.run_started_at }}' +%Y%m%d)" >> $GITHUB_ENV
       - name: Check docker image and run container
         env:
           DOCKER_IMAGE: ${{ env.DOCKER_IMAGE }}
@@ -1288,6 +1257,7 @@ jobs:
             -e PYTHON_VERSION \
             -e PADDLE_URL \
             -e BASE_NAME \
+            -e DATE \
             -e GITHUB_SHA="${{ github.event.pull_request.head.sha }}" \
             -e GITHUB_HEAD_REF="${{ github.head_ref }}" \
             -e GITHUB_REPO_NAME="${{ github.repository }}" \
@@ -1305,16 +1275,14 @@ jobs:
           mkdir -p /home/.cache/pip
           pip cache dir
           pip install --upgrade pip
-          if [ ${PYTHON_VERSION} != "3.10" ]; then
-            wget https://mirrors.tuna.tsinghua.edu.cn/anaconda/miniconda/Miniconda3-latest-Linux-x86_64.sh -O miniconda.sh
-            bash miniconda.sh -b -p $HOME/miniconda -u
-            source "$HOME/miniconda/etc/profile.d/conda.sh"
-            conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
-            conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
-            conda init bash
-            conda create -n python${PYTHON_VERSION} python=${PYTHON_VERSION} -y
-            conda activate python${PYTHON_VERSION}
-          fi
+          wget https://mirrors.tuna.tsinghua.edu.cn/anaconda/miniconda/Miniconda3-latest-Linux-x86_64.sh -O miniconda.sh
+          bash miniconda.sh -b -p $HOME/miniconda -u
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
+          conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
+          conda init bash
+          conda create -n python${PYTHON_VERSION} python=${PYTHON_VERSION} -y
+          conda activate python${PYTHON_VERSION}
           git clone https://github.com/PaddlePaddle/PaddleFleet.git
           cd PaddleFleet
           git config --global --add safe.directory /workspace/PaddleFleet
@@ -1334,14 +1302,9 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          if [ "${PYTHON_VERSION}" != "3.10" ]; then
-            source "$HOME/miniconda/etc/profile.d/conda.sh"
-            conda activate python${PYTHON_VERSION}
-            paddle_whl=paddlepaddle_gpu-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
-            paddle_url="${PADDLE_URL}${paddle_whl}"
-          else
-            paddle_url=${PADDLE_URL}
-          fi
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${PYTHON_VERSION}
+          paddle_url=${PADDLE_URL}
           if [ ${CUDA_VERSION} == "cu129" ]; then
             paddle_whl=paddlepaddle_gpu-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
             paddle_url="${PADDLE_URL}${paddle_whl}"
@@ -1377,10 +1340,8 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
-          if [ "${PYTHON_VERSION}" != "3.10" ]; then
-            source "$HOME/miniconda/etc/profile.d/conda.sh"
-            conda activate python${PYTHON_VERSION}
-          fi
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${PYTHON_VERSION}
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           bash -x PaddleFormers/tests/integration_test/glm45_a100.sh pt
@@ -1398,10 +1359,8 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
-          if [ "${PYTHON_VERSION}" != "3.10" ]; then
-            source "$HOME/miniconda/etc/profile.d/conda.sh"
-            conda activate python${PYTHON_VERSION}
-          fi
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${PYTHON_VERSION}
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           timeout 5m bash -x PaddleFormers/tests/integration_test/glm45_a100.sh sft
@@ -1419,10 +1378,8 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
-          if [ "${PYTHON_VERSION}" != "3.10" ]; then
-            source "$HOME/miniconda/etc/profile.d/conda.sh"
-            conda activate python${PYTHON_VERSION}
-          fi
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${PYTHON_VERSION}
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           timeout 5m bash -x PaddleFormers/tests/integration_test/glm45_a100.sh lora
@@ -1440,10 +1397,8 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
-          if [ "${PYTHON_VERSION}" != "3.10" ]; then
-            source "$HOME/miniconda/etc/profile.d/conda.sh"
-            conda activate python${PYTHON_VERSION}
-          fi
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${PYTHON_VERSION}
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           timeout 5m bash -x PaddleFormers/tests/integration_test/glm45_a100.sh dpo
@@ -1461,10 +1416,8 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
-          if [ "${PYTHON_VERSION}" != "3.10" ]; then
-            source "$HOME/miniconda/etc/profile.d/conda.sh"
-            conda activate python${PYTHON_VERSION}
-          fi
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${PYTHON_VERSION}
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           timeout 5m bash -x PaddleFormers/tests/integration_test/glm45_a100.sh dpo_lora
@@ -1482,10 +1435,8 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
-          if [ "${PYTHON_VERSION}" != "3.10" ]; then
-            source "$HOME/miniconda/etc/profile.d/conda.sh"
-            conda activate python${PYTHON_VERSION}
-          fi
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${PYTHON_VERSION}
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3_a100.sh pt
@@ -1503,10 +1454,8 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
-          if [ "${PYTHON_VERSION}" != "3.10" ]; then
-            source "$HOME/miniconda/etc/profile.d/conda.sh"
-            conda activate python${PYTHON_VERSION}
-          fi
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${PYTHON_VERSION}
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3_a100.sh sft
@@ -1524,10 +1473,8 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
-          if [ "${PYTHON_VERSION}" != "3.10" ]; then
-            source "$HOME/miniconda/etc/profile.d/conda.sh"
-            conda activate python${PYTHON_VERSION}
-          fi
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${PYTHON_VERSION}
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3_a100.sh lora
@@ -1545,10 +1492,8 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
-          if [ "${PYTHON_VERSION}" != "3.10" ]; then
-            source "$HOME/miniconda/etc/profile.d/conda.sh"
-            conda activate python${PYTHON_VERSION}
-          fi
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${PYTHON_VERSION}
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh tp8 a100
@@ -1566,10 +1511,8 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
-          if [ "${PYTHON_VERSION}" != "3.10" ]; then
-            source "$HOME/miniconda/etc/profile.d/conda.sh"
-            conda activate python${PYTHON_VERSION}
-          fi
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${PYTHON_VERSION}
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3vl_lora.sh a100
@@ -1587,10 +1530,8 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
-          if [ "${PYTHON_VERSION}" != "3.10" ]; then
-            source "$HOME/miniconda/etc/profile.d/conda.sh"
-            conda activate python${PYTHON_VERSION}
-          fi
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${PYTHON_VERSION}
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           timeout 10m bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh moe a100
@@ -1620,7 +1561,7 @@ jobs:
             -O bos_tools.py
           push_file=$(realpath bos_tools.py)
           cp /workspace/PaddleFleet/coveragedata/coverage.xml coverage.xml
-          target_path="paddle-github-action/${GITHUB_REPO_NAME}/ce/$(date +%Y%m%d)/a100"
+          target_path="paddle-github-action/${GITHUB_REPO_NAME}/ce/${DATE}/a100"
           python ${push_file} coverage.xml ${target_path}
           '
 
@@ -1645,8 +1586,10 @@ jobs:
     steps:
       - name: Determine the runner
         run: |
-          gpu_id=$(( $(echo $PWD | awk -F'/' '{print $3}' | awk -F'-' '{print $2}') + 3 ))
+          gpu_id=$(( $(echo $PWD | awk -F'/' '{print $3}' | awk -F'-' '{print $2}') - 1 ))
           echo GPU_DEVICES="$gpu_id" >> $GITHUB_ENV
+          # 使用 workflow 开始时间作为统一日期，避免跨天后路径不一致
+          echo DATE="$(date -d '${{ github.run_started_at }}' +%Y%m%d)" >> $GITHUB_ENV
 
       - name: Check docker image and run container
         env:
@@ -1671,6 +1614,7 @@ jobs:
             -e CE_name \
             -e PIP_CACHE_DIR \
             -e work_dir \
+            -e DATE \
             -e GITHUB_SHA="${{ github.event.pull_request.head.sha }}" \
             -e GITHUB_HEAD_REF="${{ github.head_ref }}" \
             -e GITHUB_BASE_SHA="${{ github.event.pull_request.base.sha }}" \
@@ -1709,7 +1653,7 @@ jobs:
           h20_single_coverage.xml:h20-single/coverage.xml:integration-test-H20-single-card
           a100_coverage.xml:a100/coverage.xml:integration-test-a100
           "
-          base_url="https://paddle-github-action.bj.bcebos.com/${GITHUB_REPO_NAME}/ce/$(date +%Y%m%d)"
+          base_url="https://paddle-github-action.bj.bcebos.com/${GITHUB_REPO_NAME}/ce/${DATE}"
 
           # 记录失败的任务
           FAILED_TASKS=""
@@ -1785,7 +1729,7 @@ jobs:
             https://paddle-qa.bj.bcebos.com/CodeSync/develop/PaddlePaddle/PaddleTest/tools/bos_tools.py \
             -O bos_tools.py
           push_file=$(realpath bos_tools.py)
-          target_path="paddle-github-action/${GITHUB_REPO_NAME}/ce/$(date +%Y%m%d)"
+          target_path="paddle-github-action/${GITHUB_REPO_NAME}/ce/${DATE}"
           python ${push_file} merged_coverage.xml ${target_path}
           python ${push_file} coverage-full.txt ${target_path}
           '
