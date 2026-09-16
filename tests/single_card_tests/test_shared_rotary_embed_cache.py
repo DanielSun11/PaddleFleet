@@ -150,10 +150,24 @@ class TestSharedRotaryEmbedCache(SharedRotaryCacheTestBase):
         self.assertIsNot(left(512, 0), right(512, 0))
         self.assertEqual(len(_SHARED_EMB_CACHE), 2)
 
-    def test_use_accuracy_compatible_not_confused(self) -> None:
-        """The flag only moves where the exponent is evaluated, which can change
-        its last bits -- so it must still split the signature."""
-        self._assert_not_confused(use_accuracy_compatible=True)
+    def test_rope_scaling_factor_normalized_when_scaling_off(self) -> None:
+        """With ``rope_scaling=False`` the factor never feeds ``inv_freq``, so
+        different factors must share one table."""
+        left = _build(rope_scaling=False, rope_scaling_factor=8.0)
+        right = _build(rope_scaling=False, rope_scaling_factor=4.0)
+        self.assertEqual(left._emb_cache_sig, right._emb_cache_sig)
+        self.assertIs(left(512, 0), right(512, 0))
+        self.assertEqual(len(_SHARED_EMB_CACHE), 1)
+
+    def test_use_accuracy_compatible_does_not_split(self) -> None:
+        """``use_accuracy_compatible`` only moves the exponent between CPU and
+        GPU, which produces a bit-identical table -- so it must not split the
+        signature."""
+        left = _build(use_accuracy_compatible=True)
+        right = _build(use_accuracy_compatible=False)
+        self.assertEqual(left._emb_cache_sig, right._emb_cache_sig)
+        self.assertIs(left(512, 0), right(512, 0))
+        self.assertEqual(len(_SHARED_EMB_CACHE), 1)
 
     def test_equal_effective_dim_does_share(self) -> None:
         """The signature keys on the *effective* dim, so ``head_dim=64,

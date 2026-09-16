@@ -173,14 +173,15 @@ class RotaryEmbedding(nn.Layer):
 
         # Configuration signature: everything the angle table depends on besides
         # ``(max_seq_len, offset)``. ``inv_freq`` is itself a pure function of
-        # ``dim``, ``rotary_base``, the rope-scaling settings and
-        # ``use_accuracy_compatible`` (which changes where the exponent is
-        # evaluated and therefore its last bits), so listing those is equivalent
-        # to hashing ``inv_freq`` without touching the device. ``type(self)``
-        # keeps a subclass that overrides the ``inv_freq`` math -- e.g.
-        # ``YarnRotaryEmbedding`` -- from ever matching a base-class instance.
-        # The place string keeps a CPU-built table from being served to a GPU
-        # caller.
+        # ``dim``, ``rotary_base`` and the rope-scaling settings, so listing
+        # those is equivalent to hashing ``inv_freq`` without touching the
+        # device. ``rope_scaling_factor`` only feeds ``inv_freq`` when
+        # ``rope_scaling`` is set, so it is normalised to ``None`` otherwise --
+        # otherwise two layers with equivalent tables would not share. The
+        # ``type(self)`` entry keeps a subclass that overrides the ``inv_freq``
+        # math -- e.g. ``YarnRotaryEmbedding`` -- from ever matching a
+        # base-class instance. The place string keeps a CPU-built table from
+        # being served to a GPU caller.
         #
         # Used as the key of ``_SHARED_EMB_CACHE``. Keep it in sync with
         # anything new that feeds ``get_freqs_non_repeated``.
@@ -193,8 +194,7 @@ class RotaryEmbedding(nn.Layer):
             if seq_len_interpolation_factor is None
             else float(seq_len_interpolation_factor),
             bool(rope_scaling),
-            float(rope_scaling_factor),
-            bool(use_accuracy_compatible),
+            None if not rope_scaling else float(rope_scaling_factor),
             str(self.inv_freq.place),
         )
 
